@@ -1,16 +1,22 @@
+import cupy as cp
+import numpy as np
+
 class MerkleTree:
-    def __init__(self, data, hash, enable_gpu=False):
+    def __init__(self, data, hash, enable_gpu=False, is_batched=False):
         self.data = data
         self.hash = hash
         self.gpu = enable_gpu
+        self.batched = is_batched
+
+        self.xp = cp if self.gpu else np
 
         self.levels = []
         self.levels.append([self.hash(block) for block in data])
         self.root = self._build_tree()
 
     def _hash_level(self, level_data):
-        if self.gpu:
-            pass
+        if self.batched:
+            return self.hash(self.xp.array(level_data))
         else:
             return [self.hash(block) for block in level_data]
         

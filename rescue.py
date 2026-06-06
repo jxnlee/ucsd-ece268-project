@@ -307,7 +307,7 @@ class RescuePrime:
             
         batch_size = len(batch_elements)
         
-        # 1. Padding Phase (Executed uniformly for the batch)
+        # Padding Phase (Executed uniformly for the batch)
         # Find the maximum message length in the batch to pad uniformly
         max_len = max(len(msg) for msg in batch_elements)
         padded_len = max_len + 1
