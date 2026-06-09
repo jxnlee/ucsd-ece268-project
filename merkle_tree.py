@@ -1,84 +1,129 @@
-import cupy as cp
 import numpy as np
 
-class MerkleTree:
-    def __init__(self, data, hash, enable_gpu=False, is_batched=False):
-        self.data = data
-        self.hash = hash
-        self.gpu = enable_gpu
-        self.batched = is_batched
+try:
+    import cupy as cp
+except ImportError:
+    cp = None
 
-        self.xp = cp if self.gpu else np
+from kangaroo12 import Kangaroo12
+
+
+class CpuHashBackend:
+
+    def __init__(self, fn):
+        self.fn = fn
+
+    def hash_batch(self, blocks: list[bytes]) -> list[bytes]:
+        return [self.fn(b) for b in blocks]
+
+
+class K12CpuBackend:
+
+    def __init__(self):
+        self._k12 = Kangaroo12(enable_gpu=False)
+
+    def hash_batch(self, blocks: list[bytes]) -> list[bytes]:
+        return [self._k12.hash(b, b"", 32) for b in blocks]
+
+
+class K12GpuBackend:
+
+    def __init__(self):
+        if cp is None:
+            raise ImportError("CuPy is required for K12GpuBackend.")
+        self._k12 = Kangaroo12(enable_gpu=True)
+
+    def hash_batch(self, blocks: list[bytes]) -> list[bytes]:
+        results = [self._k12.hash(b, b"", 32) for b in blocks]
+        cp.cuda.Stream.null.synchronize()
+        return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MerkleTree
+# ─────────────────────────────────────────────────────────────────────────────
+
+class MerkleTree:
+    
+    def __init__(self, data: list[bytes], backend=None,
+                 hash=None, enable_gpu: bool = False, is_batched: bool = False):
+
+        self.data = data
+
+        if backend is not None:
+            self.backend = backend
+        elif enable_gpu:
+            self.backend = K12GpuBackend()
+        elif hash is not None:
+            self.backend = CpuHashBackend(hash)
+        else:
+            self.backend = K12CpuBackend()
+
+        # kept for callers that inspect these attributes
+        self.gpu     = enable_gpu or isinstance(self.backend, K12GpuBackend)
+        self.batched = is_batched
+        self.xp      = cp if self.gpu else np
 
         self.levels = []
-        self.levels.append([self.hash(block) for block in data])
-        self.root = self._build_tree()
+        self.root   = self._build()
 
-    def _hash_level(self, level_data):
-        if self.batched:
-            return self.hash(self.xp.array(level_data))
-        else:
-            return [self.hash(block) for block in level_data]
-        
-    def _concatenate(self, left, right):
-        return left + right
-        
-    def _build_tree(self):
-        current = self.levels[0]
+
+    def _build(self) -> bytes:
+        current = self.backend.hash_batch(self.data)
+        self.levels.append(current)
 
         while len(current) > 1:
-            # handle odd case by duplicating last node
-            if len(current) % 2 != 0:
-                current.append(current[-1])
+            if len(current) % 2:
+                current = current + [current[-1]]   # duplicate last node if odd
 
-            # gather left and right nodes
-            left_nodes = current[0::2]
-            right_nodes = current[1::2]
+            pairs   = [current[i] + current[i + 1]
+                       for i in range(0, len(current), 2)]
+            current = self.backend.hash_batch(pairs)
+            self.levels.append(current)
 
-            # compute next level by hashing concatenated pairs
-            next_level = self._hash_level([self._concatenate(left, right) for left, right in zip(left_nodes, right_nodes)])
-            self.levels.append(next_level)
-
-            # move up to the next level
-            current = next_level
-        
-        # return root hash
         return current[0]
-    
-    def get_proof(self, index):
-        """
-        Generates an audit path (Merkle Proof).
-        Returns a list of tuples: (sibling_hash, is_left_sibling)
-        """
+
+
+    def get_proof(self, index: int) -> list[tuple[bytes, bool]]:
         proof = []
-        for level in self.levels[:-1]:  # Exclude root level
-            is_right_child = (index % 2 == 1)
-            
-            if is_right_child:
-                sibling_index = index - 1
+        for level in self.levels[:-1]:
+            is_right = (index % 2 == 1)
+            if is_right:
+                sib_idx         = index - 1
                 is_left_sibling = True
             else:
-                # If an odd layer was padded, the sibling of the last element is itself
-                sibling_index = index + 1 if (index + 1 < len(level)) else index
+                sib_idx         = index + 1 if index + 1 < len(level) else index
                 is_left_sibling = False
-                
-            proof.append((level[sibling_index], is_left_sibling))
-            index //= 2  # Move up to the parent's index position
-            
+            proof.append((level[sib_idx], is_left_sibling))
+            index //= 2
         return proof
-    
-    def verify_proof(self, leaf, proof, expected_root):
-        """
-        Verifies that a leaf resolves to the expected root using the direction-aware proof.
-        """
-        computed_hash = self.hash(leaf)
-        
-        for sibling_hash, is_left_sibling in proof:
-            if is_left_sibling:
-                # Sibling belongs on the left
-                computed_hash = self.hash(self._concatenate(sibling_hash, computed_hash))
-            else:
-                # Sibling belongs on the right
-                computed_hash = self.hash(self._concatenate(computed_hash, sibling_hash))
-                
-        return computed_hash == expected_root
+
+
+    def verify_proof(self, leaf: bytes, proof: list[tuple[bytes, bool]],
+                     expected_root: bytes) -> bool:
+
+        cur = self.backend.hash_batch([leaf])[0]
+        for sib, is_left in proof:
+            pair = (sib + cur) if is_left else (cur + sib)
+            cur  = self.backend.hash_batch([pair])[0]
+        return cur == expected_root
+
+
+    def _h(self, data: bytes) -> bytes:
+        return self.backend.hash_batch([data])[0]
+
+    def _concatenate(self, left, right):
+        return left + right
+
+    def _hash_level(self, level_data):
+        return self.backend.hash_batch(list(level_data))
+
+    def _build_tree(self):
+        current = self.levels[0]
+        while len(current) > 1:
+            if len(current) % 2:
+                current.append(current[-1])
+            pairs   = [current[i] + current[i + 1] for i in range(0, len(current), 2)]
+            current = self._hash_level(pairs)
+            self.levels.append(current)
+        return current[0]
