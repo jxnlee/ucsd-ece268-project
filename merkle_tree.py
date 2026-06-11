@@ -18,8 +18,24 @@ class MerkleTree:
             return self.hash(level_data)
         else:
             return [self.hash(block) for block in level_data]
+
+    def _hash_single(self, block):
+        if self.batched:
+            result = self.hash([block])
+            if isinstance(result, (list, tuple)):
+                return result[0]
+            if cp is not None and isinstance(result, cp.ndarray):
+                return result[0]
+            if isinstance(result, np.ndarray):
+                return result[0]
+            return result
+        return self.hash(block)
         
     def _concatenate(self, left, right):
+        if cp is not None and isinstance(left, cp.ndarray) and isinstance(right, cp.ndarray):
+            return cp.concatenate([left, right])
+        if isinstance(left, np.ndarray) and isinstance(right, np.ndarray):
+            return np.concatenate([left, right])
         return left + right
         
     def _build_tree(self):
@@ -73,14 +89,18 @@ class MerkleTree:
         """
         Verifies that a leaf resolves to the expected root using the direction-aware proof.
         """
-        computed_hash = self.hash(leaf)
+        computed_hash = self._hash_single(leaf)
         
         for sibling_hash, is_left_sibling in proof:
             if is_left_sibling:
                 # Sibling belongs on the left
-                computed_hash = self.hash(self._concatenate(sibling_hash, computed_hash))
+                computed_hash = self._hash_single(self._concatenate(sibling_hash, computed_hash))
             else:
                 # Sibling belongs on the right
-                computed_hash = self.hash(self._concatenate(computed_hash, sibling_hash))
+                computed_hash = self._hash_single(self._concatenate(computed_hash, sibling_hash))
                 
+        if cp is not None and (isinstance(computed_hash, cp.ndarray) or isinstance(expected_root, cp.ndarray)):
+            return cp.array_equal(computed_hash, expected_root)
+        if isinstance(computed_hash, np.ndarray) or isinstance(expected_root, np.ndarray):
+            return np.array_equal(computed_hash, expected_root)
         return computed_hash == expected_root

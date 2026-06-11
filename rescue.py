@@ -289,7 +289,7 @@ class RescuePrime:
                 tail = np.concatenate([np.array([1], dtype=self.dtype), np.zeros(pad_needed, dtype=self.dtype)])
             padded_arr = np.concatenate([arr, tail])
 
-        print(padded_arr)
+        # print(padded_arr)
 
         state = self._zeros(self.m)
 
@@ -400,218 +400,82 @@ class RescuePrime:
                 
         # Return the array directly in the active array backend.
         return outputs
-def run_differential_test():
-    # ---------------------------------------------------------
-    # 1. Parameter Setup
-    # ---------------------------------------------------------
-    p = 2**61 - 1  # 61-bit Mersenne Prime
-    m = 3          # State width
-    c = 1          # Capacity
-    s = 128        # Security bits
+# ---------------------------------------------------------------------------
+# Benchmarks
+# ---------------------------------------------------------------------------
 
-    print("Initializing Rescue-Prime Test Instances...")
-    print("==========================================")
-    
-    # Initialize CPU Instance
-    start_init = time.perf_counter()
-    cpu_rp = RescuePrime(p, m, c, s, enable_gpu=False)
-    cpu_init_time = time.perf_counter() - start_init
-    print(f"[-] CPU Instance Ready (Init took: {cpu_init_time:.4f}s)")
-
-    # Initialize GPU Instance
-    # Note: This will compile the ElementwiseKernel exactly once
-    start_init = time.perf_counter()
-    try:
-        gpu_rp = RescuePrime(p, m, c, s, enable_gpu=True)
-        gpu_init_time = time.perf_counter() - start_init
-        print(f"[-] GPU Instance Ready (Init + Kernel Compile took: {gpu_init_time:.4f}s)")
-        has_gpu = True
-    except Exception as e:
-        print(f"\n[!] GPU Initialization Failed! Ensure CuPy and CUDA are installed correctly.")
-        print(f"    Error details: {e}")
-        print("    Aborting differential benchmarking, running CPU check only.")
-        has_gpu = False
-
-    # ---------------------------------------------------------
-    # 2. Test Vector Generation
-    # ---------------------------------------------------------
-    # We will generate a reasonably long sequence of random elements modulo p
-    # to make sure the sponge absorption loop iterates multiple times.
-    num_elements = 500  
-    test_vector = [random.randint(0, p - 1) for _ in range(num_elements)]
-    output_len = 10  # Squeeze out 10 field elements
-    
-    print(f"\nGenerated test vector containing {num_elements} field elements.")
-    print("Beginning execution benchmarks...\n")
-
-    # ---------------------------------------------------------
-    # 3. CPU Hashing Execution
-    # ---------------------------------------------------------
-    # Warm-up pass to let python optimize lookup paths
-    _ = cpu_rp.hash(test_vector, output_length=output_len)
-    
-    # Timed benchmarking loop
-    iterations = 5
-    cpu_start = time.perf_counter()
-    for _ in range(iterations):
-        cpu_hash_output = cpu_rp.hash(test_vector, output_length=output_len)
-    cpu_total_time = time.perf_counter() - cpu_start
-    cpu_avg_time = cpu_total_time / iterations
-
-    print("--- CPU Performance Results ---")
-    print(f"Total time ({iterations} passes): {cpu_total_time:.6f} seconds")
-    print(f"Average time per hash    : {cpu_avg_time:.6f} seconds")
-
-    if not has_gpu:
-        print(f"Sample CPU Digest: {cpu_hash_output[:3]}...")
-        return
-
-    # ---------------------------------------------------------
-    # 4. GPU Hashing Execution
-    # ---------------------------------------------------------
-    # Warm-up pass (Crucial for GPU! Compiles under-the-hood internal execution structures)
-    _ = gpu_rp.hash(test_vector, output_length=output_len)
-    cp.cuda.Stream.null.synchronize() # Wait for the GPU warm-up to completely finish
-
-    gpu_start = time.perf_counter()
-    for _ in range(iterations):
-        gpu_hash_output = gpu_rp.hash(test_vector, output_length=output_len)
-    
-    # CRITICAL: CUDA execution is asynchronous. Python will continue running lines 
-    # before the GPU hardware finishes. We MUST synchronize to get an accurate time measurement.
-    cp.cuda.Stream.null.synchronize()
-    gpu_total_time = time.perf_counter() - gpu_start
-    gpu_avg_time = gpu_total_time / iterations
-
-    print("\n--- GPU Performance Results ---")
-    print(f"Total time ({iterations} passes): {gpu_total_time:.6f} seconds")
-    print(f"Average time per hash    : {gpu_avg_time:.6f} seconds")
-
-    # ---------------------------------------------------------
-    # 5. Differential Validation & Verification
-    # ---------------------------------------------------------
-    print("\n--- Correctness and Validation Verification ---")
-    print("==================================================")
-    
-    # Assert exact dimensional structures match
-    if len(cpu_hash_output) != len(gpu_hash_output):
-        print("[FAIL] Output length mismatch!")
-        print(f"       CPU Length: {len(cpu_hash_output)}, GPU Length: {len(gpu_hash_output)}")
-        return
-
-    # Deep element-by-element equivalence evaluation
-    match = True
-    for idx in range(len(cpu_hash_output)):
-        if cpu_hash_output[idx] != gpu_hash_output[idx]:
-            print(f"[FAIL] Cryptographic divergence at field element index {idx}!")
-            print(f"       CPU element: {cpu_hash_output[idx]}")
-            print(f"       GPU element: {gpu_hash_output[idx]}")
-            match = False
-            break
-
-    if match:
-        print("[PASS] Cryptographic Equivalence Confirmed!")
-        print("       The CPU array and GPU VRAM arrays computed completely identical digest elements.")
-        print(f"Digest Sample: {cpu_hash_output[:3]}...")
-        
-        # Calculate speedup metric
-        if gpu_avg_time > 0:
-            speedup = cpu_avg_time / gpu_avg_time
-            print(f"\n[Speedup Factor]: GPU is operating {speedup:.2f}x faster than the CPU variant on this payload.")
-def run_batched_differential_test():
+def run_comprehensive_benchmarks():
+    REPS=5
     p = 2**61 - 1
     m = 3
     c = 1
     s = 128
-    output_len = 2
+    output_len = 1
 
-    print("Initializing Batch Instances...")
-    cpu_rp = RescuePrime(p, m, c, s, enable_gpu=False)
+    random.seed(0)
+    rp_cpu = RescuePrime(p=p, m=m, c=c, s=s, enable_gpu=False)
+    rp_gpu = RescuePrime(p=p, m=m, c=c, s=s, enable_gpu=True)
+
+    print("\n" + "="*90)
+    print(" Experiment 1: Batched Hash Benchmark (Fixed Message Size: 8 Bytes)")
+    print("="*90)
+    hdr = f"  {'N Messages':<12} | {'CPU Time (ms)':<13} | {'GPU Batch (ms)':<14} | {'CPU us/hash':<12} | {'GPU us/hash':<12} | {'Speedup':<10}"
+    print(hdr)
+    print("  " + "-" * (len(hdr) - 2))
+
+    MSG_SZ = 8
     
-    try:
-        gpu_rp = RescuePrime(p, m, c, s, enable_gpu=True)
-        has_gpu = True
-    except Exception as e:
-        print(f"GPU Init failed: {e}")
-        has_gpu = False
 
-    # ---------------------------------------------------------
-    # Generate Batch Data: 10,000 messages, each with 10 elements
-    # ---------------------------------------------------------
-    batch_size = 10000
-    elements_per_message = 10
-    
-    print(f"\nGenerating batch dataset: {batch_size} messages...")
-    test_batch = [
-        [random.randint(0, 255) for _ in range(elements_per_message)]
-        for _ in range(batch_size)
-    ]
-    print("Dataset ready. Running benchmarks...\n")
+    for N in [16, 256, 4096, 8192]:
+        batched_msgs = [[random.randint(0, 255) for _ in range(MSG_SZ)] for _ in range(N)]
 
-    # ---------------------------------------------------------
-    # CPU Batch Hashing
-    # ---------------------------------------------------------
-    print("Running CPU Batch...")
-    # Warm-up
-    _ = cpu_rp.hash_batch(test_batch[:10], output_length=output_len)
-    
-    start_cpu = time.perf_counter()
-    cpu_results = cpu_rp.hash_batch(test_batch, output_length=output_len).tolist()
-    cpu_time = time.perf_counter() - start_cpu
-    print(f"[-] CPU Batch completed in: {cpu_time:.4f} seconds")
+        cpu_samples = []
+        for _ in range(REPS):
+            t0 = time.perf_counter()
+            for msg in batched_msgs:
+                rp_cpu.hash(msg, output_len)
+            cpu_samples.append(time.perf_counter() - t0)
+        cpu_ms = min(cpu_samples) * 1000.0
+        cpu_us = (cpu_ms * 1000.0) / N
 
-    if not has_gpu:
-        return
+        gpu_bat_samples = []
+        for _ in range(REPS):
+            t0 = time.perf_counter()
+            rp_gpu.hash_batch(batched_msgs, output_len)
+            cp.cuda.Stream.null.synchronize()
+            gpu_bat_samples.append(time.perf_counter() - t0)
+        gpu_ms = min(gpu_bat_samples) * 1000.0
+        gpu_us = (gpu_ms * 1000.0) / N
+        print(f"  {N:<12} | {cpu_ms:<13.2f} | {gpu_ms:<14.2f} | {cpu_us:<12.2f} | {gpu_us:<12.2f} | {cpu_ms/gpu_ms:.2f}x")
 
-    # ---------------------------------------------------------
-    # GPU Batch Hashing
-    # ---------------------------------------------------------
-    print("\nRunning GPU Batch...")
-    # Warm-up
-    _ = gpu_rp.hash_batch(test_batch[:10], output_length=output_len)
-    cp.cuda.Stream.null.synchronize()
+    print("\n" + "="*95)
+    print(" Experiment 2: Variable Input Size Scaling (Single Message)")
+    print("="*95)
+    print(f"  {'Input Size':<12} | {'CPU Time (ms)':<13} | {'GPU Time (ms)':<13} | {'CPU Throughput':<16} | {'GPU Throughput':<16} | {'Speedup':<10}")
+    print("  " + "-"*92)
 
-    start_gpu = time.perf_counter()
-    gpu_results = gpu_rp.hash_batch(test_batch, output_length=output_len).get().tolist()
-    cp.cuda.Stream.null.synchronize() # Crucial synchronization check
-    gpu_time = time.perf_counter() - start_gpu
-    print(f"[-] GPU Batch completed in: {gpu_time:.4f} seconds")
+    for label, size in [("8 B", 8),("512 B", 512), ("1 KB", 1024), ("4 KB", 4096), ("8 KB", 8192)]:
+        single_msg  = [random.randint(0, 255) for _ in range(size)]
+        cpu_samples = []
+        for _ in range(REPS):
+            t0 = time.perf_counter()
+            rp_cpu.hash(single_msg, output_len)
+            cpu_samples.append(time.perf_counter() - t0)
+        cpu_ms   = min(cpu_samples) * 1000.0
+        cpu_kbps = (size / 1e3) / (cpu_ms / 1000.0)
 
-    # ---------------------------------------------------------
-    # Verification & Speedup Calculation
-    # ---------------------------------------------------------
-    print("\n--- Validation Results ---")
-    if cpu_results == gpu_results:
-        print("[PASS] Cryptographic Equivalence Maintained across all 10,000 hashes!")
-        speedup = cpu_time / gpu_time
-        print(f"[Speedup Factor]: GPU is {speedup:.2f}x FASTER than CPU.")
-    else:
-        print("[FAIL] Outputs diverged!")
+        gpu_samples = []
+        for _ in range(REPS):
+            t0 = time.perf_counter()
+            rp_gpu.hash(single_msg, output_len)
+            cp.cuda.Stream.null.synchronize()
+            gpu_samples.append(time.perf_counter() - t0)
+        gpu_ms   = min(gpu_samples) * 1000.0
+        gpu_kbps = (size / 1e3) / (gpu_ms / 1000.0)
+        print(f"  {label:<12} | {cpu_ms:<13.3f} | {gpu_ms:<13.3f} | {cpu_kbps:.2f} MB/s     | {gpu_kbps:.2f} MB/s       | {cpu_ms/gpu_ms:.2f}x")
 
-
-def validate():
-    p = 2**61 - 1
-    alpha = 23
-    alpha_inv = pow(alpha, -1, p - 1)
-    num_rounds = 10
-    state_size = 3
-    constants = [[(i * j + 1)%p for j in range(state_size)] for i in range(2*num_rounds)]
-    mds = [
-    [2, 3, 1],
-    [1, 1, 4],
-    [3, 5, 6]
-]
-
-    cpu_rp = RescuePrime(p=p, m=state_size, c=1, s=128, enable_gpu=False)
-    cpu_rp.alpha = alpha
-    cpu_rp.alpha_inv = alpha_inv
-    cpu_rp.N = 10
-    cpu_rp.constants = cpu_rp._array(constants)
-    cpu_rp.MDS = cpu_rp._array(mds)
-
-    result = cpu_rp.hash([])
-    print(result)
+    print("="*95 + "\n")
 
 
 if __name__ == "__main__":
-    run_batched_differential_test()
+    run_comprehensive_benchmarks()
