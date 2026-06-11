@@ -379,7 +379,7 @@ class RescuePrime:
         # 2. Absorbing Phase (Loops over message chunks, but processes ALL batches in parallel)
         for chunk_idx in range(0, padded_len, self.rp):
             # Slice out the same chunk slice across all batches simultaneously
-            chunk = padded_arr[:, chunk_idx : chunk_idx + self.rp]
+            chunk = padded_arr_backend[:, chunk_idx : chunk_idx + self.rp]
             
             # Vectorized addition across the entire batch matrix slice
             state[:, :self.rp] = (state[:, :self.rp] + chunk) % self.p
