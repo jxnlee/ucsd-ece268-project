@@ -64,9 +64,20 @@ class MerkleTree:
         self.batched = is_batched
         self.xp      = cp if self.gpu else np
 
-        self.levels = []
-        self.root   = self._build()
+        self.levels = [self._hash_level(data)]
+        self.root = self._build_tree()
 
+    def _hash_level(self, level_data):
+        if self.batched:
+            return self.hash(level_data)
+        else:
+            return [self.hash(block) for block in level_data]
+        
+    def _concatenate(self, left, right):
+        return left + right
+        
+    def _build_tree(self):
+        current = self.levels[0]
 
     def _build(self) -> bytes:
         current = self.backend.hash_batch(self.data)
@@ -81,6 +92,13 @@ class MerkleTree:
             current = self.backend.hash_batch(pairs)
             self.levels.append(current)
 
+            # move up to the next level
+            current = next_level
+
+        if self.gpu:
+            cp.cuda.Stream.null.synchronize()
+        
+        # return root hash
         return current[0]
 
 
