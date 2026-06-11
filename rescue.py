@@ -246,10 +246,8 @@ class RescuePrime:
         """Adds the appropriate round constants"""
         return (state + self.constants[round_index]) % self.p
 
-    def rescue_xlix_permutation(self, state_array):
+    def rescue_xlix_permutation(self, state):
         """Executes the Rescue-XLIX permutation using optimized matrix math."""
-        state = self._array(state_array)
-        
         for i in range(self.N):
             # S-box Layer
             state = self._sbox_pow(state, self.alpha)
@@ -270,29 +268,56 @@ class RescuePrime:
     def hash(self, message_elements, output_length=None):
         if output_length is None:
             output_length = self.rp
-            
-        padded = list(message_elements) + [1]
-        while len(padded) % self.rp != 0:
-            padded.append(0)
-            
+        # Prepare padded message on the active backend without transferring memory
+        if self.gpu and isinstance(message_elements, cp.ndarray):
+            arr = message_elements.astype(self.dtype)
+            total_len = int(arr.size) + 1
+            pad_needed = (-(total_len)) % self.rp
+            if pad_needed == 0:
+                tail = cp.array([1], dtype=self.dtype)
+            else:
+                tail = cp.concatenate([cp.array([1], dtype=self.dtype), cp.zeros(pad_needed, dtype=self.dtype)])
+            padded_arr = cp.concatenate([arr, tail])
+        else:
+            # Use NumPy arrays for CPU or other iterable inputs
+            arr = np.asarray(message_elements, dtype=self.dtype)
+            total_len = int(arr.size) + 1
+            pad_needed = (-(total_len)) % self.rp
+            if pad_needed == 0:
+                tail = np.array([1], dtype=self.dtype)
+            else:
+                tail = np.concatenate([np.array([1], dtype=self.dtype), np.zeros(pad_needed, dtype=self.dtype)])
+            padded_arr = np.concatenate([arr, tail])
+
+        print(padded_arr)
+
         state = self._zeros(self.m)
-        
-        # Absorbing Phase
-        for chunk_idx in range(0, len(padded), self.rp):
-            chunk = self._array(padded[chunk_idx : chunk_idx + self.rp])
-            state[:self.rp] = (state[:self.rp] + chunk) % self.p
+
+        # Absorbing Phase (iterate over chunks directly on the active backend)
+        for chunk_idx in range(0, padded_arr.size, self.rp):
+            chunk = padded_arr[chunk_idx: chunk_idx + self.rp]
+            # ensure chunk uses the active xp type
+            if (self.gpu and cp is not None and isinstance(padded_arr, cp.ndarray)) or (not self.gpu and isinstance(padded_arr, np.ndarray)):
+                state[:self.rp] = (state[:self.rp] + chunk) % self.p
+            else:
+                # convert to active backend
+                state[:self.rp] = (state[:self.rp] + self._array(chunk)) % self.p
             state = self.rescue_xlix_permutation(state)
             
         # Squeezing Phase
-        output = []
-        while len(output) < output_length:
+        output = self._zeros(output_length)
+
+        squeezed_count = 0
+        while squeezed_count < output_length:
             for j in range(self.rp):
-                if len(output) < output_length:
-                    output.append(int(state[j]))
-            if len(output) < output_length:
+                if squeezed_count < output_length:
+                    output[squeezed_count] = state[j]
+                    squeezed_count += 1
+            if squeezed_count < output_length:
                 state = self.rescue_xlix_permutation(state)
                 
         return output
+
     def hash_batch(self, batch_elements, output_length=None):
         """
         Hashes a batch of messages simultaneously.
@@ -302,6 +327,9 @@ class RescuePrime:
         batch_elements : list of lists, or 2D array
             An array/list of shape (batch_size, num_elements_per_message)
         """
+        if (self.gpu and not isinstance(batch_elements, cp.ndarray)) or (not self.gpu and not isinstance(batch_elements, np.ndarray)):
+            batch_elements = self.xp.array(batch_elements)
+        #print(batch_elements)
         if output_length is None:
             output_length = self.rp
             
@@ -314,14 +342,36 @@ class RescuePrime:
         if padded_len % self.rp != 0:
             padded_len += self.rp - (padded_len % self.rp)
             
-        # Build a uniform 2D padded matrix on the host side
-        padded_matrix = []
-        for msg in batch_elements:
-            padded_msg = list(msg) + [1] + [0] * (padded_len - len(msg) - 1)
-            padded_matrix.append(padded_msg)
-            
+        # Build a uniform 2D padded matrix on the active backend without unintended transfers
+        if self.gpu and isinstance(batch_elements, cp.ndarray):
+            arr = batch_elements.astype(self.dtype)
+            if arr.ndim == 1:
+                arr = arr.reshape((arr.shape[0], 1))
+            batch_size, orig_len = arr.shape
+            ones = cp.ones((batch_size, 1), dtype=self.dtype)
+            zeros_tail = cp.zeros((batch_size, padded_len - orig_len - 1), dtype=self.dtype) if (padded_len - orig_len - 1) > 0 else cp.zeros((batch_size, 0), dtype=self.dtype)
+            padded_arr = cp.concatenate([arr, ones, zeros_tail], axis=1)
+        else:
+            # Accept lists of lists or NumPy arrays; build padded NumPy matrix to convert once if needed
+            if isinstance(batch_elements, np.ndarray):
+                arr = batch_elements.astype(self.dtype)
+                if arr.ndim == 1:
+                    arr = arr.reshape((arr.shape[0], 1))
+            else:
+                # list of lists or uneven lengths
+                arr = np.zeros((batch_size, padded_len - 0), dtype=self.dtype)
+                for i, msg in enumerate(batch_elements):
+                    msg_arr = np.asarray(msg, dtype=self.dtype)
+                    arr[i, :msg_arr.size] = msg_arr
+            ones = np.ones((batch_size, 1), dtype=self.dtype)
+            zeros_tail = np.zeros((batch_size, padded_len - arr.shape[1] - 1), dtype=self.dtype) if (padded_len - arr.shape[1] - 1) > 0 else np.zeros((batch_size, 0), dtype=self.dtype)
+            padded_arr = np.concatenate([arr, ones, zeros_tail], axis=1)
+
         # Send the entire batch data to the target device (CPU or GPU) AT ONCE
-        padded_arr = self._array(padded_matrix) # Shape: (batch_size, padded_len)
+        if self.gpu and isinstance(padded_arr, cp.ndarray):
+            padded_arr_backend = padded_arr
+        else:
+            padded_arr_backend = self._array(padded_arr)
         
         # Initialize batch state: Shape (batch_size, m)
         state = self._zeros((batch_size, self.m))
@@ -348,12 +398,8 @@ class RescuePrime:
             if squeezed_count < output_length:
                 state = self.rescue_xlix_permutation(state)
                 
-        # CRITICAL FIX: Pull the ENTIRE batch matrix back from the GPU to the CPU memory 
-        # in one single bulk transfer, rather than looping item-by-item over PCIe.
-        if self.gpu:
-            return outputs.get().astype(int).tolist() # .get() safely pulls full VRAM to RAM
-        else:
-            return outputs.astype(int).tolist()
+        # Return the array directly in the active array backend.
+        return outputs
 def run_differential_test():
     # ---------------------------------------------------------
     # 1. Parameter Setup
@@ -497,7 +543,7 @@ def run_batched_differential_test():
     
     print(f"\nGenerating batch dataset: {batch_size} messages...")
     test_batch = [
-        [random.randint(0, p - 1) for _ in range(elements_per_message)]
+        [random.randint(0, 255) for _ in range(elements_per_message)]
         for _ in range(batch_size)
     ]
     print("Dataset ready. Running benchmarks...\n")
@@ -510,7 +556,7 @@ def run_batched_differential_test():
     _ = cpu_rp.hash_batch(test_batch[:10], output_length=output_len)
     
     start_cpu = time.perf_counter()
-    cpu_results = cpu_rp.hash_batch(test_batch, output_length=output_len)
+    cpu_results = cpu_rp.hash_batch(test_batch, output_length=output_len).tolist()
     cpu_time = time.perf_counter() - start_cpu
     print(f"[-] CPU Batch completed in: {cpu_time:.4f} seconds")
 
@@ -526,7 +572,7 @@ def run_batched_differential_test():
     cp.cuda.Stream.null.synchronize()
 
     start_gpu = time.perf_counter()
-    gpu_results = gpu_rp.hash_batch(test_batch, output_length=output_len)
+    gpu_results = gpu_rp.hash_batch(test_batch, output_length=output_len).get().tolist()
     cp.cuda.Stream.null.synchronize() # Crucial synchronization check
     gpu_time = time.perf_counter() - start_gpu
     print(f"[-] GPU Batch completed in: {gpu_time:.4f} seconds")
@@ -541,6 +587,31 @@ def run_batched_differential_test():
         print(f"[Speedup Factor]: GPU is {speedup:.2f}x FASTER than CPU.")
     else:
         print("[FAIL] Outputs diverged!")
+
+
+def validate():
+    p = 2**61 - 1
+    alpha = 23
+    alpha_inv = pow(alpha, -1, p - 1)
+    num_rounds = 10
+    state_size = 3
+    constants = [[(i * j + 1)%p for j in range(state_size)] for i in range(2*num_rounds)]
+    mds = [
+    [2, 3, 1],
+    [1, 1, 4],
+    [3, 5, 6]
+]
+
+    cpu_rp = RescuePrime(p=p, m=state_size, c=1, s=128, enable_gpu=False)
+    cpu_rp.alpha = alpha
+    cpu_rp.alpha_inv = alpha_inv
+    cpu_rp.N = 10
+    cpu_rp.constants = cpu_rp._array(constants)
+    cpu_rp.MDS = cpu_rp._array(mds)
+
+    result = cpu_rp.hash([])
+    print(result)
+
 
 if __name__ == "__main__":
     run_batched_differential_test()

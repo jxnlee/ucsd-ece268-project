@@ -10,13 +10,12 @@ class MerkleTree:
 
         self.xp = cp if self.gpu else np
 
-        self.levels = []
-        self.levels.append([self.hash(block) for block in data])
+        self.levels = [self._hash_level(data)]
         self.root = self._build_tree()
 
     def _hash_level(self, level_data):
         if self.batched:
-            return self.hash(self.xp.array(level_data))
+            return self.hash(level_data)
         else:
             return [self.hash(block) for block in level_data]
         
@@ -41,6 +40,9 @@ class MerkleTree:
 
             # move up to the next level
             current = next_level
+
+        if self.gpu:
+            cp.cuda.Stream.null.synchronize()
         
         # return root hash
         return current[0]
