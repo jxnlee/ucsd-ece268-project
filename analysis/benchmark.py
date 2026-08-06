@@ -27,9 +27,9 @@ try:
 except ImportError:
     HAS_CUPY = False
 
-from kangaroo12 import Kangaroo12
-from merkle_tree import MerkleTree
-from rescue import RescuePrime
+from hash_src.kangaroo12 import Kangaroo12
+from hash_src.merkle_tree import MerkleTree
+from hash_src.rescue import RescuePrime
 
 # ── Benchmark grid ─────────────────────────────────────────────────────────────
 # Tune these lists to taste.

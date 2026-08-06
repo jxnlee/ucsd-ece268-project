@@ -1,6 +1,6 @@
 import time
-from merkle_tree import MerkleTree
-from kangaroo12 import Kangaroo12
+from hash_src.merkle_tree import MerkleTree
+from hash_src.kangaroo12 import Kangaroo12
 import numpy as np
 import time
 

@@ -8,9 +8,9 @@ try:
 except ImportError:
     cp = None
 
-from kangaroo12 import Kangaroo12
-from rescue import RescuePrime
-from merkle_tree import MerkleTree
+from hash_src.kangaroo12 import Kangaroo12
+from hash_src.rescue import RescuePrime
+from hash_src.merkle_tree import MerkleTree
 
 # -----------------------------------------------------------------------------
 # Patch MerkleTree concatenation to behave consistently for CPU and GPU arrays.
